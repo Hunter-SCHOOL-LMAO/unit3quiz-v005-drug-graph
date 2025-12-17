@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import Papa from 'papaparse'
 import {
   BarChart,
@@ -8,16 +8,59 @@ import {
   CartesianGrid,
   Tooltip,
   Legend,
-  ResponsiveContainer,
-  Cell
+  ResponsiveContainer
 } from 'recharts'
 import './App.css'
+
+// Dynamically import Firebase modules
+const getFirebaseModules = async () => {
+  const [{ db }, firestore] = await Promise.all([
+    import('./firebase'),
+    import('firebase/firestore')
+  ])
+  return { db, ...firestore }
+}
 
 function App() {
   const [chartData, setChartData] = useState([])
   const [loading, setLoading] = useState(true)
   const [selectedMetric, setSelectedMetric] = useState('all')
   const [totalRecords, setTotalRecords] = useState(0)
+  
+  // Registration modal state
+  const [showModal, setShowModal] = useState(false)
+  const [email, setEmail] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [submitMessage, setSubmitMessage] = useState(null)
+  const [voteStats, setVoteStats] = useState({ for: 0, against: 0 })
+  const [firebaseLoaded, setFirebaseLoaded] = useState(false)
+
+  // Fetch vote stats using dynamic import
+  const fetchVoteStats = useCallback(async () => {
+    try {
+      const { db, collection, getDocs } = await getFirebaseModules()
+      const votesRef = collection(db, 'votes')
+      const snapshot = await getDocs(votesRef)
+      let forCount = 0
+      let againstCount = 0
+      snapshot.forEach(doc => {
+        const data = doc.data()
+        if (data.vote === 'for') forCount++
+        if (data.vote === 'against') againstCount++
+      })
+      setVoteStats({ for: forCount, against: againstCount })
+      setFirebaseLoaded(true)
+    } catch (error) {
+      console.error('Error fetching votes:', error)
+    }
+  }, [])
+
+  // Load Firebase and fetch votes when modal opens
+  useEffect(() => {
+    if (showModal && !firebaseLoaded) {
+      fetchVoteStats()
+    }
+  }, [showModal, firebaseLoaded, fetchVoteStats])
 
   useEffect(() => {
     Papa.parse('/Warehouse_and_Retail_Sales.csv', {
@@ -79,6 +122,62 @@ function App() {
     retailTransfers: '#7c5cff'
   }
 
+  const handleVote = async (voteType) => {
+    if (!email || !email.includes('@')) {
+      setSubmitMessage({ type: 'error', text: 'Please enter a valid email address' })
+      return
+    }
+
+    setIsSubmitting(true)
+    setSubmitMessage(null)
+
+    try {
+      const { db, collection, addDoc, getDocs, query, where } = await getFirebaseModules()
+      
+      // Check if email has already voted
+      const votesRef = collection(db, 'votes')
+      const q = query(votesRef, where('email', '==', email.toLowerCase()))
+      const existingVotes = await getDocs(q)
+      
+      if (!existingVotes.empty) {
+        setSubmitMessage({ type: 'error', text: 'This email has already voted!' })
+        setIsSubmitting(false)
+        return
+      }
+
+      // Add vote to Firestore
+      await addDoc(votesRef, {
+        email: email.toLowerCase(),
+        vote: voteType,
+        timestamp: new Date().toISOString()
+      })
+
+      setSubmitMessage({ 
+        type: 'success', 
+        text: `Vote recorded! You voted "${voteType.toUpperCase()}". Thank you!` 
+      })
+      setEmail('')
+      
+      // Refresh vote stats
+      await fetchVoteStats()
+      
+      // Close modal after delay
+      setTimeout(() => {
+        setShowModal(false)
+        setSubmitMessage(null)
+      }, 2500)
+
+    } catch (error) {
+      console.error('Error submitting vote:', error)
+      setSubmitMessage({ 
+        type: 'error', 
+        text: 'Error submitting vote. Please check Firebase configuration.' 
+      })
+    }
+
+    setIsSubmitting(false)
+  }
+
   const CustomTooltip = ({ active, payload, label }) => {
     if (active && payload && payload.length) {
       const data = chartData.find(d => d.shortName === label)
@@ -112,6 +211,78 @@ function App() {
 
   return (
     <div className="app">
+      {/* Registration Button - Fixed in Corner */}
+      <button 
+        className="register-btn"
+        onClick={() => setShowModal(true)}
+      >
+        <span className="register-icon">✋</span>
+        Vote Now
+      </button>
+
+      {/* Registration Modal */}
+      {showModal && (
+        <div className="modal-overlay" onClick={() => setShowModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setShowModal(false)}>×</button>
+            
+            <div className="modal-header">
+              <h2>Cast Your Vote</h2>
+              <p>Enter your email and vote for or against the data insights</p>
+            </div>
+
+            <div className="vote-stats">
+              <div className="vote-stat for">
+                <span className="vote-count">{voteStats.for}</span>
+                <span className="vote-label">For</span>
+              </div>
+              <div className="vote-divider">vs</div>
+              <div className="vote-stat against">
+                <span className="vote-count">{voteStats.against}</span>
+                <span className="vote-label">Against</span>
+              </div>
+            </div>
+
+            <div className="modal-form">
+              <div className="input-group">
+                <label htmlFor="email">Email Address</label>
+                <input
+                  type="email"
+                  id="email"
+                  placeholder="your@email.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  disabled={isSubmitting}
+                />
+              </div>
+
+              {submitMessage && (
+                <div className={`submit-message ${submitMessage.type}`}>
+                  {submitMessage.text}
+                </div>
+              )}
+
+              <div className="vote-buttons">
+                <button 
+                  className="vote-btn for"
+                  onClick={() => handleVote('for')}
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting ? '...' : '👍 FOR'}
+                </button>
+                <button 
+                  className="vote-btn against"
+                  onClick={() => handleVote('against')}
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting ? '...' : '👎 AGAINST'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <header className="header">
         <div className="header-glow"></div>
         <h1>Warehouse & Retail Sales</h1>
